@@ -1,19 +1,17 @@
 # Stage 0: Source Prep - Get all code including submodules
-# This stage installs git and manually initializes the submodules,
-# creating a complete source tree for subsequent stages to use.
+# This stage installs git and then clones the repository directly from GitHub.
+# This is the key fix that ensures a complete Git repository, including submodules, exists for the build.
 FROM node:22-slim AS source-prep
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY . .
-RUN git submodule update --init --recursive
+# Clone the repository AND its submodules directly inside the container.
+RUN git clone --recurse-submodules https://github.com/mendableai/firecrawl.git .
 
 
 # Stage 1: Base Node.js environment
 FROM node:22-slim AS base
-
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-
 RUN corepack enable
 WORKDIR /app
 # Copy the complete source code from the prep stage
@@ -72,7 +70,7 @@ COPY --from=go-base /app/sharedLibs/go-html-to-md/html-to-markdown.so /app/share
 COPY --from=rust-base /app/sharedLibs/html-transformer/target/release/libhtml_transformer.so /app/sharedLibs/html-transformer/target/release/libhtml_transformer.so
 COPY --from=rust-base /app/sharedLibs/pdf-parser/target/release/libpdf_parser.so /app/sharedLibs/pdf-parser/target/release/libpdf_parser.so
 
-# The original Dockerfile installs git in the final stage, which is good practice.
+# Install git
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 # Start the server by default, this can be overwritten at runtime
