@@ -23,6 +23,7 @@ export enum IntegrationEnum {
   MAKE = "make",
   FLOWISE = "flowise",
   METAGPT = "metagpt",
+  RELEVANCEAI = 'relevanceai',
 }
 
 export type Format =
@@ -169,55 +170,64 @@ function calculateTotalWaitTime(
   return waitFor + actionWaitTime;
 }
 
-export const actionsSchema = z
-  .array(
-    z.union([
-      z
-        .object({
-          type: z.literal("wait"),
-          milliseconds: z.number().int().positive().finite().optional(),
-          selector: z.string().optional(),
-        })
-        .refine(
-          (data) =>
-            (data.milliseconds !== undefined || data.selector !== undefined) &&
-            !(data.milliseconds !== undefined && data.selector !== undefined),
-          {
-            message:
-              "Either 'milliseconds' or 'selector' must be provided, but not both.",
-          },
-        ),
-      z.object({
-        type: z.literal("click"),
-        selector: z.string(),
-        all: z.boolean().default(false),
-      }),
-      z.object({
-        type: z.literal("screenshot"),
-        fullPage: z.boolean().default(false),
-      }),
-      z.object({
-        type: z.literal("write"),
-        text: z.string(),
-      }),
-      z.object({
-        type: z.literal("press"),
-        key: z.string(),
-      }),
-      z.object({
-        type: z.literal("scroll"),
-        direction: z.enum(["up", "down"]).optional().default("down"),
+export const actionSchema = z
+  .union([
+    z
+      .object({
+        type: z.literal("wait"),
+        milliseconds: z.number().int().positive().finite().optional(),
         selector: z.string().optional(),
-      }),
-      z.object({
-        type: z.literal("scrape"),
-      }),
-      z.object({
-        type: z.literal("executeJavascript"),
-        script: z.string(),
-      }),
-    ]),
-  )
+      })
+      .refine(
+        (data) =>
+          (data.milliseconds !== undefined || data.selector !== undefined) &&
+          !(data.milliseconds !== undefined && data.selector !== undefined),
+        {
+          message:
+            "Either 'milliseconds' or 'selector' must be provided, but not both.",
+        },
+      ),
+    z.object({
+      type: z.literal("click"),
+      selector: z.string(),
+      all: z.boolean().default(false),
+    }),
+    z.object({
+      type: z.literal("screenshot"),
+      fullPage: z.boolean().default(false),
+    }),
+    z.object({
+      type: z.literal("write"),
+      text: z.string(),
+    }),
+    z.object({
+      type: z.literal("press"),
+      key: z.string(),
+    }),
+    z.object({
+      type: z.literal("scroll"),
+      direction: z.enum(["up", "down"]).optional().default("down"),
+      selector: z.string().optional(),
+    }),
+    z.object({
+      type: z.literal("scrape"),
+    }),
+    z.object({
+      type: z.literal("executeJavascript"),
+      script: z.string(),
+    }),
+    z.object({
+      type: z.literal("pdf"),
+      landscape: z.boolean().default(false),
+      scale: z.number().default(1),
+      format: z.enum(['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'Letter', 'Legal', 'Tabloid', 'Ledger']).default("Letter"),
+    }),
+  ]);
+
+export type Action = z.infer<typeof actionSchema>;
+
+export const actionsSchema = z
+  .array(actionSchema)
   .refine((actions) => actions.length <= MAX_ACTIONS, {
     message: `Number of actions cannot exceed ${MAX_ACTIONS}`,
   })
@@ -328,6 +338,7 @@ const baseScrapeOptions = z
     proxy: z.enum(["basic", "stealth", "auto"]).optional(),
     maxAge: z.number().int().gte(0).safe().default(0),
     storeInCache: z.boolean().default(true),
+    // @deprecated
     __experimental_cache: z.boolean().default(false).optional(),
     __searchPreviewToken: z.string().optional(),
   })
@@ -599,6 +610,7 @@ export const batchScrapeRequestSchemaNoURLValidation = baseScrapeOptions
     webhook: webhookSchema.optional(),
     appendToId: z.string().uuid().optional(),
     ignoreInvalidURLs: z.boolean().default(false),
+    maxConcurrency: z.number().positive().int().optional(),
   })
   .strict(strictMessage)
   .refine(extractRefine, extractRefineOpts)
@@ -615,7 +627,8 @@ const crawlerOptions = z
     maxDepth: z.number().default(10), // default?
     maxDiscoveryDepth: z.number().optional(),
     limit: z.number().default(10000), // default?
-    allowBackwardLinks: z.boolean().default(false), // >> TODO: CHANGE THIS NAME???
+    allowBackwardLinks: z.boolean().default(false), // DEPRECATED: use crawlEntireDomain
+    crawlEntireDomain: z.boolean().optional(),
     allowExternalLinks: z.boolean().default(false),
     allowSubdomains: z.boolean().default(false),
     ignoreRobotsTxt: z.boolean().default(false),
@@ -632,7 +645,8 @@ const crawlerOptions = z
 //   excludePaths?: string[];
 //   maxDepth?: number;
 //   limit?: number;
-//   allowBackwardLinks?: boolean; // >> TODO: CHANGE THIS NAME???
+//   allowBackwardLinks?: boolean; // DEPRECATED: use crawlEntireDomain
+//   crawlEntireDomain?: boolean;
 //   allowExternalLinks?: boolean;
 //   ignoreSitemap?: boolean;
 // };
@@ -652,10 +666,15 @@ export const crawlRequestSchema = crawlerOptions
   .strict(strictMessage)
   .refine((x) => extractRefine(x.scrapeOptions), extractRefineOpts)
   .refine((x) => fire1Refine(x.scrapeOptions), fire1RefineOpts)
-  .transform((x) => ({
-    ...x,
-    scrapeOptions: extractTransform(x.scrapeOptions),
-  }));
+  .transform((x) => {
+    if (x.crawlEntireDomain !== undefined) {
+      x.allowBackwardLinks = x.crawlEntireDomain;
+    }
+    return {
+      ...x,
+      scrapeOptions: extractTransform(x.scrapeOptions),
+    };
+  });
 
 // export type CrawlRequest = {
 //   url: string;
@@ -716,6 +735,7 @@ export type Document = {
       type: string;
       value: unknown;
     }[];
+    pdfs?: string[];
   };
   changeTracking?: {
     previousScrapeAt: string | null;
@@ -1041,7 +1061,7 @@ export function toLegacyCrawlerOptions(x: CrawlerOptions) {
     maxDepth: x.maxDepth,
     limit: x.limit,
     generateImgAltText: false,
-    allowBackwardCrawling: x.allowBackwardLinks,
+    allowBackwardCrawling: x.crawlEntireDomain ?? x.allowBackwardLinks,
     allowExternalContentLinks: x.allowExternalLinks,
     allowSubdomains: x.allowSubdomains,
     ignoreRobotsTxt: x.ignoreRobotsTxt,
@@ -1062,6 +1082,7 @@ export function toNewCrawlerOptions(x: any): CrawlerOptions {
     limit: x.limit,
     maxDepth: x.maxDepth,
     allowBackwardLinks: x.allowBackwardCrawling,
+    crawlEntireDomain: x.allowBackwardCrawling,
     allowExternalLinks: x.allowExternalContentLinks,
     allowSubdomains: x.allowSubdomains,
     ignoreRobotsTxt: x.ignoreRobotsTxt,
@@ -1085,6 +1106,7 @@ export function fromLegacyCrawlerOptions(x: any, teamId: string): {
       limit: x.maxCrawledLinks ?? x.limit,
       maxDepth: x.maxDepth,
       allowBackwardLinks: x.allowBackwardCrawling,
+      crawlEntireDomain: x.allowBackwardCrawling,
       allowExternalLinks: x.allowExternalContentLinks,
       allowSubdomains: x.allowSubdomains,
       ignoreRobotsTxt: x.ignoreRobotsTxt,
